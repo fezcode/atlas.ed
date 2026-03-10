@@ -168,6 +168,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle Search Navigation Mode
 		if m.mode == ModeSearchNav {
 			switch msg.String() {
+			case "enter":
+				m.mode = ModeEdit
+				return m, nil
 			case "n":
 				m.findNext()
 				m.updateViewport()
@@ -287,7 +290,26 @@ func (m *Model) jumpToMatch() {
 	if m.matchIndex < 0 { return }
 	
 	offset := m.matches[m.matchIndex]
-	m.textarea.SetCursor(offset)
+	plain := m.textarea.Value()
+
+	targetLine := strings.Count(plain[:offset], "\n")
+	
+	lastNewLine := strings.LastIndex(plain[:offset], "\n")
+	targetCol := 0
+	if lastNewLine == -1 {
+		targetCol = len([]rune(plain[:offset]))
+	} else {
+		targetCol = len([]rune(plain[lastNewLine+1 : offset]))
+	}
+
+	for m.textarea.Line() < targetLine {
+		m.textarea.CursorDown()
+	}
+	for m.textarea.Line() > targetLine {
+		m.textarea.CursorUp()
+	}
+	
+	m.textarea.SetCursor(targetCol)
 }
 
 func (m Model) View() string {
@@ -338,6 +360,7 @@ func (m Model) footerView() string {
 	var help string
 	if m.mode == ModeSearchNav {
 		help = lipgloss.JoinHorizontal(lipgloss.Top,
+			helpKeyStyle.Render(" enter "), helpDescStyle.Render("go to match "),
 			helpKeyStyle.Render(" n/p "), helpDescStyle.Render("next/prev "),
 			helpKeyStyle.Render(" q/esc "), helpDescStyle.Render("stop search "),
 			helpKeyStyle.Render(" ^Q "), helpDescStyle.Render("quit "),
