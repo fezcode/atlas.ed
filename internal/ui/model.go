@@ -72,6 +72,10 @@ type Model struct {
 	showLineNumbers bool
 	modified        bool
 	
+	// Undo/Redo
+	undoStack []string
+	redoStack []string
+	
 	// Search
 	searchQuery string
 	matches     []int
@@ -190,6 +194,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Handle Edit Mode
 		switch msg.String() {
+		case "ctrl+z":
+			m.undo()
+			return m, nil
+		case "ctrl+y":
+			m.redo()
+			return m, nil
 		case "ctrl+s":
 			m.saveFile()
 			return m, nil
@@ -221,6 +231,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea, taCmd = m.textarea.Update(msg)
 		if m.textarea.Value() != prevVal {
 			m.modified = true
+			m.undoStack = append(m.undoStack, prevVal)
+			m.redoStack = nil // Clear redo on new change
+			if len(m.undoStack) > 100 {
+				m.undoStack = m.undoStack[1:]
+			}
 		}
 		cmds = append(cmds, taCmd)
 	}
@@ -248,6 +263,44 @@ func (m *Model) updateViewport() {
 	plain := m.textarea.Value()
 	lineNum := strings.Count(plain[:offset], "\n")
 	m.viewport.SetYOffset(lineNum)
+}
+
+func (m *Model) undo() {
+	if len(m.undoStack) == 0 {
+		return
+	}
+
+	// Current state to redo stack
+	m.redoStack = append(m.redoStack, m.textarea.Value())
+
+	// Pop from undo stack
+	prev := m.undoStack[len(m.undoStack)-1]
+	m.undoStack = m.undoStack[:len(m.undoStack)-1]
+
+	m.textarea.SetValue(prev)
+	m.modified = true // Usually undoing still counts as modified if it's different from initial
+	if m.textarea.Value() == m.initialContent {
+		m.modified = false
+	}
+}
+
+func (m *Model) redo() {
+	if len(m.redoStack) == 0 {
+		return
+	}
+
+	// Current state to undo stack
+	m.undoStack = append(m.undoStack, m.textarea.Value())
+
+	// Pop from redo stack
+	next := m.redoStack[len(m.redoStack)-1]
+	m.redoStack = m.redoStack[:len(m.redoStack)-1]
+
+	m.textarea.SetValue(next)
+	m.modified = true
+	if m.textarea.Value() == m.initialContent {
+		m.modified = false
+	}
 }
 
 func (m *Model) saveFile() {
@@ -368,6 +421,8 @@ func (m Model) footerView() string {
 	} else {
 		help = lipgloss.JoinHorizontal(lipgloss.Top,
 			helpKeyStyle.Render(" ^S "), helpDescStyle.Render("save "),
+			helpKeyStyle.Render(" ^Z "), helpDescStyle.Render("undo "),
+			helpKeyStyle.Render(" ^Y "), helpDescStyle.Render("redo "),
 			helpKeyStyle.Render(" ^F "), helpDescStyle.Render("find "),
 			helpKeyStyle.Render(" ^L "), helpDescStyle.Render("lines "),
 			helpKeyStyle.Render(" ^Q "), helpDescStyle.Render("quit "),
