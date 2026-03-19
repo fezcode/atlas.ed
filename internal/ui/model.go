@@ -231,9 +231,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showLineNumbers = !m.showLineNumbers
 			m.textarea.ShowLineNumbers = m.showLineNumbers
 		case "pgup":
-			m.textarea.SetCursor(max(0, m.textarea.Line()-m.textarea.Height()))
+			for i := 0; i < m.textarea.Height(); i++ {
+				m.textarea.CursorUp()
+			}
 		case "pgdown":
-			m.textarea.SetCursor(min(m.textarea.LineCount()-1, m.textarea.Line()+m.textarea.Height()))
+			for i := 0; i < m.textarea.Height(); i++ {
+				m.textarea.CursorDown()
+			}
 		case "home":
 			m.textarea.CursorStart()
 		case "end":
