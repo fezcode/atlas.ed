@@ -96,7 +96,11 @@ func NewModel(filename string, content string) Model {
 	ta.SetCursor(0) // Start at the top
 	ta.Focus()
 	ta.ShowLineNumbers = true
-	ta.LineNumberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37"))
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37"))
+	ta.FocusedStyle.LineNumber = style
+	ta.BlurredStyle.LineNumber = style
+	ta.FocusedStyle.CursorLineNumber = style
+	ta.BlurredStyle.CursorLineNumber = style
 
 	si := textinput.New()
 	si.Placeholder = "Search query..."
