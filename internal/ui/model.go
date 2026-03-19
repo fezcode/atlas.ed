@@ -84,6 +84,14 @@ type Model struct {
 	// Cache
 	highlightedContent   string
 	lastHighlightedValue string
+	
+	headerCache string
+	footerCache string
+	lastWidth   int
+	lastMode    Mode
+	lastModified bool
+	lastMatchesCount int
+	lastMatchIndex int
 
 	width  int
 	height int
@@ -96,6 +104,7 @@ func NewModel(filename string, content string) Model {
 	ta.SetCursor(0) // Start at the top
 	ta.Focus()
 	ta.ShowLineNumbers = true
+	ta.MaxHeight = 9999 // Ensure gutter width is consistent for up to 9999 lines
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37"))
 	ta.FocusedStyle.LineNumber = style
 	ta.BlurredStyle.LineNumber = style
@@ -120,11 +129,11 @@ func NewModel(filename string, content string) Model {
 	}
 }
 
-func (m Model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -222,13 +231,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showLineNumbers = !m.showLineNumbers
 			m.textarea.ShowLineNumbers = m.showLineNumbers
 		case "pgup":
-			for i := 0; i < m.textarea.Height(); i++ {
-				m.textarea.CursorUp()
-			}
+			m.textarea.SetCursor(max(0, m.textarea.Line()-m.textarea.Height()))
 		case "pgdown":
-			for i := 0; i < m.textarea.Height(); i++ {
-				m.textarea.CursorDown()
-			}
+			m.textarea.SetCursor(min(m.textarea.LineCount()-1, m.textarea.Line()+m.textarea.Height()))
 		case "home":
 			m.textarea.CursorStart()
 		case "end":
@@ -296,9 +301,10 @@ func (m *Model) updateViewport() {
 	if m.showLineNumbers {
 		var sb strings.Builder
 		lines := strings.Split(final, "\n")
-		width := len(fmt.Sprintf("%d", len(lines)))
+		// Use MaxHeight for consistent width, same as textarea
+		width := len(fmt.Sprintf("%d", m.textarea.MaxHeight))
 		for i, line := range lines {
-			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37")).Render(fmt.Sprintf("%*d ", width, i+1)))
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37")).Render(fmt.Sprintf(" %*d ", width, i+1)))
 			sb.WriteString(line)
 			if i < len(lines)-1 {
 				sb.WriteByte('\n')
@@ -415,7 +421,7 @@ func (m *Model) jumpToMatch() {
 	m.textarea.SetCursor(targetCol)
 }
 
-func (m Model) View() string {
+func (m *Model) View() string {
 	var body string
 	if m.mode == ModeSearchNav {
 		body = m.viewport.View()
@@ -433,7 +439,11 @@ func (m Model) View() string {
 	return view
 }
 
-func (m Model) headerView() string {
+func (m *Model) headerView() string {
+	if m.headerCache != "" && m.width == m.lastWidth && m.mode == m.lastMode && m.modified == m.lastModified {
+		return m.headerCache
+	}
+
 	var currentMode string
 	switch m.mode {
 	case ModeSearchNav:
@@ -452,12 +462,21 @@ func (m Model) headerView() string {
 	status := statusStyle.Render(" " + m.filename + modChar + " ")
 	
 	line := strings.Repeat("─", max(0, m.width-lipgloss.Width(title)-lipgloss.Width(mLabel)-lipgloss.Width(status)))
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, mLabel, status, infoStyle.Render(line))
+	m.headerCache = lipgloss.JoinHorizontal(lipgloss.Center, title, mLabel, status, infoStyle.Render(line))
+	m.lastWidth = m.width
+	m.lastMode = m.mode
+	m.lastModified = m.modified
+
+	return m.headerCache
 }
 
-func (m Model) footerView() string {
+func (m *Model) footerView() string {
 	if m.mode == ModeSearchInput {
 		return m.searchInput.View()
+	}
+
+	if m.footerCache != "" && m.width == m.lastWidth && m.mode == m.lastMode && len(m.matches) == m.lastMatchesCount && m.matchIndex == m.lastMatchIndex {
+		return m.footerCache
 	}
 
 	var help string
@@ -487,10 +506,19 @@ func (m Model) footerView() string {
 	gap := max(0, m.width-lipgloss.Width(help)-lipgloss.Width(matchInfo)-2)
 	line := strings.Repeat(" ", gap)
 	
-	return lipgloss.JoinHorizontal(lipgloss.Center, help, line, matchInfo)
+	m.footerCache = lipgloss.JoinHorizontal(lipgloss.Center, help, line, matchInfo)
+	m.lastMatchesCount = len(m.matches)
+	m.lastMatchIndex = m.matchIndex
+
+	return m.footerCache
 }
 
 func max(a, b int) int {
 	if a > b { return a }
+	return b
+}
+
+func min(a, b int) int {
+	if a < b { return a }
 	return b
 }
