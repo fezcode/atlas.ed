@@ -82,6 +82,8 @@ type Model struct {
 	matches     []int
 	matchIndex  int
 	
+	lineEnding string // "\n" or "\r\n"
+	
 	// Cache
 	highlightedContent   string
 	lastHighlightedValue string
@@ -99,6 +101,14 @@ type Model struct {
 }
 
 func NewModel(filename string, content string) Model {
+	le := "\n"
+	if strings.Contains(content, "\r\n") {
+		le = "\r\n"
+	}
+
+	// Normalize internally to LF
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+
 	ta := textarea.New()
 	ta.Placeholder = "Start typing..."
 	ta.SetValue(content)
@@ -136,6 +146,7 @@ func NewModel(filename string, content string) Model {
 		mode:            ModeEdit,
 		showLineNumbers: true,
 		matchIndex:      -1,
+		lineEnding:      le,
 	}
 }
 
@@ -306,20 +317,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) updateViewport() {
 	content := m.textarea.Value()
 	if content != m.lastHighlightedValue {
+		// Ensure we highlight with normalized newlines if chroma needs it, 
+		// but highlighter.go already splits by \n
 		highlighted, _ := editor.Highlight(content, m.filename)
 		m.highlightedContent = highlighted
 		m.lastHighlightedValue = content
 	}
 	
-	final := editor.HighlightSearch(m.highlightedContent, m.searchQuery, m.matchIndex)
+	var final string
+	if m.mode == ModeSearchNav {
+		final = editor.HighlightSearch(m.highlightedContent, m.searchQuery, m.matchIndex)
+	} else {
+		final = editor.HighlightCursor(m.highlightedContent, m.textarea.Line(), m.textarea.LineInfo().CharOffset)
+	}
 	
 	if m.showLineNumbers {
 		var sb strings.Builder
+		// Split by \n, handle potential \r separately if they exist in highlighted output
 		lines := strings.Split(final, "\n")
-		// Use MaxHeight for consistent width, same as textarea
 		width := len(fmt.Sprintf("%d", m.textarea.MaxHeight))
 		for i, line := range lines {
-			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37")).Render(fmt.Sprintf(" %*d ", width, i+1)))
+			if i == len(lines)-1 && line == "" {
+				break
+			}
+			lineNumberStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D4AF37"))
+			if i == m.textarea.Line() {
+				lineNumberStyle = lineNumberStyle.Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
+			}
+			sb.WriteString(lineNumberStyle.Render(fmt.Sprintf(" %*d ", width, i+1)))
 			sb.WriteString(line)
 			if i < len(lines)-1 {
 				sb.WriteByte('\n')
@@ -327,12 +352,20 @@ func (m *Model) updateViewport() {
 		}
 		final = sb.String()
 	}
+	
 	m.viewport.SetContent(final)
 	
-	if len(m.matches) > 0 && m.matchIndex >= 0 {
+	if m.mode == ModeSearchNav && len(m.matches) > 0 && m.matchIndex >= 0 {
 		offset := m.matches[m.matchIndex]
 		lineNum := strings.Count(content[:offset], "\n")
-		m.viewport.SetYOffset(lineNum)
+		m.viewport.SetYOffset(lineNum - m.viewport.Height/2)
+	} else {
+		lineNum := m.textarea.Line()
+		if lineNum < m.viewport.YOffset {
+			m.viewport.SetYOffset(lineNum)
+		} else if lineNum >= m.viewport.YOffset+m.viewport.Height {
+			m.viewport.SetYOffset(lineNum - m.viewport.Height + 1)
+		}
 	}
 }
 
@@ -341,15 +374,12 @@ func (m *Model) undo() {
 		return
 	}
 
-	// Current state to redo stack
 	m.redoStack = append(m.redoStack, m.textarea.Value())
-
-	// Pop from undo stack
 	prev := m.undoStack[len(m.undoStack)-1]
 	m.undoStack = m.undoStack[:len(m.undoStack)-1]
 
 	m.textarea.SetValue(prev)
-	m.modified = true // Usually undoing still counts as modified if it's different from initial
+	m.modified = true
 	if m.textarea.Value() == m.initialContent {
 		m.modified = false
 	}
@@ -360,10 +390,7 @@ func (m *Model) redo() {
 		return
 	}
 
-	// Current state to undo stack
 	m.undoStack = append(m.undoStack, m.textarea.Value())
-
-	// Pop from redo stack
 	next := m.redoStack[len(m.redoStack)-1]
 	m.redoStack = m.redoStack[:len(m.redoStack)-1]
 
@@ -375,7 +402,11 @@ func (m *Model) redo() {
 }
 
 func (m *Model) saveFile() {
-	_ = os.WriteFile(m.filename, []byte(m.textarea.Value()), 0644)
+	content := m.textarea.Value()
+	if m.lineEnding == "\r\n" {
+		content = strings.ReplaceAll(content, "\n", "\r\n")
+	}
+	_ = os.WriteFile(m.filename, []byte(content), 0644)
 	m.modified = false
 }
 
@@ -438,7 +469,8 @@ func (m *Model) jumpToMatch() {
 
 func (m *Model) View() string {
 	var body string
-	if m.mode == ModeSearchNav {
+	if m.mode == ModeSearchNav || m.mode == ModeEdit || m.mode == ModeSearchInput || m.mode == ModeQuitConfirm {
+		m.updateViewport()
 		body = m.viewport.View()
 	} else {
 		body = m.textarea.View()
@@ -472,12 +504,18 @@ func (m *Model) headerView() string {
 	modChar := ""
 	if m.modified { modChar = "*" }
 	
+	leLabel := " LF "
+	if m.lineEnding == "\r\n" {
+		leLabel = " CRLF "
+	}
+	
 	title := titleStyle.Render("ATLAS ED")
 	mLabel := modeStyle.Render(currentMode)
 	status := statusStyle.Render(" " + m.filename + modChar + " ")
+	leStatus := statusStyle.Render(leLabel)
 	
-	line := strings.Repeat("─", max(0, m.width-lipgloss.Width(title)-lipgloss.Width(mLabel)-lipgloss.Width(status)))
-	m.headerCache = lipgloss.JoinHorizontal(lipgloss.Center, title, mLabel, status, infoStyle.Render(line))
+	line := strings.Repeat("─", max(0, m.width-lipgloss.Width(title)-lipgloss.Width(mLabel)-lipgloss.Width(status)-lipgloss.Width(leStatus)))
+	m.headerCache = lipgloss.JoinHorizontal(lipgloss.Center, title, mLabel, status, leStatus, infoStyle.Render(line))
 	m.lastWidth = m.width
 	m.lastMode = m.mode
 	m.lastModified = m.modified

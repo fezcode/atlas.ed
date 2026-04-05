@@ -116,3 +116,88 @@ func highlightPlainPart(text, lowerQuery string, targetIdx, currentCount int) (s
 	}
 	return result.String(), count
 }
+
+func HighlightCursor(highlighted string, cursorLine, cursorCol int) string {
+	return highlightCursorInLine(highlighted, cursorLine, cursorCol)
+}
+
+func highlightCursorInLine(highlighted string, cursorLine, cursorCol int) string {
+	lines := strings.Split(highlighted, "\n")
+	if cursorLine < 0 || cursorLine >= len(lines) {
+		return highlighted
+	}
+
+	line := lines[cursorLine]
+	var result strings.Builder
+	
+	// We want to find the cursorCol-th rune, skipping ANSI codes.
+	
+	byteIdx := 0
+	currentRuneIdx := 0
+	inserted := false
+	
+	for byteIdx < len(line) {
+		if !inserted && currentRuneIdx == cursorCol {
+			// We found the position!
+			// Check if we're at an ANSI escape
+			if strings.HasPrefix(line[byteIdx:], "\x1b[") {
+				// Skip the ANSI escape first so we don't break it
+				end := strings.IndexAny(line[byteIdx:], "mABCDHJKfhnpsu")
+				if end != -1 {
+					result.WriteString(line[byteIdx : byteIdx+end+1])
+					byteIdx += end + 1
+					continue
+				}
+			}
+			
+			// Render cursor
+			r, size := nextRune(line[byteIdx:])
+			char := string(r)
+			if size == 0 { char = " " } // End of line
+			
+			result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color("#FFFFFF")).Foreground(lipgloss.Color("#000000")).Render(char))
+			
+			if size > 0 {
+				byteIdx += size
+				currentRuneIdx++
+			}
+			inserted = true
+			continue
+		}
+		
+		if strings.HasPrefix(line[byteIdx:], "\x1b[") {
+			end := strings.IndexAny(line[byteIdx:], "mABCDHJKfhnpsu")
+			if end == -1 {
+				result.WriteString(line[byteIdx:])
+				break
+			}
+			result.WriteString(line[byteIdx : byteIdx+end+1])
+			byteIdx += end + 1
+		} else {
+			r, size := nextRune(line[byteIdx:])
+			result.WriteRune(r)
+			byteIdx += size
+			currentRuneIdx++
+		}
+	}
+	
+	if !inserted {
+		// Cursor at the very end of the line
+		result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color("#FFFFFF")).Foreground(lipgloss.Color("#000000")).Render(" "))
+	}
+	
+	lines[cursorLine] = result.String()
+	return strings.Join(lines, "\n")
+}
+
+func nextRune(s string) (rune, int) {
+	if len(s) == 0 {
+		return 0, 0
+	}
+	for i, r := range s {
+		if i == 0 {
+			return r, len(string(r))
+		}
+	}
+	return 0, 0
+}
