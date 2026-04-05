@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"atlas.ed/internal/editor"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -110,6 +111,15 @@ func NewModel(filename string, content string) Model {
 	ta.BlurredStyle.LineNumber = style
 	ta.FocusedStyle.CursorLineNumber = style
 	ta.BlurredStyle.CursorLineNumber = style
+
+	ta.KeyMap.WordForward = key.NewBinding(
+		key.WithKeys("ctrl+right", "alt+right", "alt+f"),
+		key.WithHelp("ctrl+right", "word forward"),
+	)
+	ta.KeyMap.WordBackward = key.NewBinding(
+		key.WithKeys("ctrl+left", "alt+left", "alt+b"),
+		key.WithHelp("ctrl+left", "word backward"),
+	)
 
 	si := textinput.New()
 	si.Placeholder = "Search query..."
@@ -263,6 +273,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s := kmsg.String()
 			// Keys that definitely don't change content (navigation, toggle, find, quit)
 			isNav := s == "up" || s == "down" || s == "left" || s == "right" ||
+				s == "ctrl+left" || s == "ctrl+right" ||
 				s == "pgup" || s == "pgdown" || s == "home" || s == "end" ||
 				s == "ctrl+s" || s == "ctrl+f" || s == "ctrl+l" || s == "ctrl+q" || s == "ctrl+c" ||
 				s == "ctrl+z" || s == "ctrl+y" || s == "esc"
