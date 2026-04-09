@@ -20,6 +20,10 @@ var (
 				Background(lipgloss.Color("#FFFFFF")).
 				Foreground(lipgloss.Color("#000000")).
 				Bold(true)
+
+	selectionStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#264F78")).
+				Foreground(lipgloss.Color("#FFFFFF"))
 )
 
 func Highlight(content, filename string) (string, error) {
@@ -115,6 +119,72 @@ func highlightPlainPart(text, lowerQuery string, targetIdx, currentCount int) (s
 		cursor = idx + len(lowerQuery)
 	}
 	return result.String(), count
+}
+
+func HighlightSelection(highlighted string, startLine, startCol, endLine, endCol int) string {
+	lines := strings.Split(highlighted, "\n")
+
+	for lineIdx := startLine; lineIdx <= endLine && lineIdx < len(lines); lineIdx++ {
+		fromCol := 0
+		toCol := -1 // -1 means end of line
+
+		if lineIdx == startLine {
+			fromCol = startCol
+		}
+		if lineIdx == endLine {
+			toCol = endCol
+		}
+
+		lines[lineIdx] = highlightRange(lines[lineIdx], fromCol, toCol)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func highlightRange(line string, fromCol, toCol int) string {
+	var before, selected, after strings.Builder
+	byteIdx := 0
+	runeIdx := 0
+
+	for byteIdx < len(line) {
+		if strings.HasPrefix(line[byteIdx:], "\x1b[") {
+			end := strings.IndexAny(line[byteIdx:], "mABCDHJKfhnpsu")
+			if end == -1 {
+				if runeIdx < fromCol {
+					before.WriteString(line[byteIdx:])
+				} else if toCol != -1 && runeIdx >= toCol {
+					after.WriteString(line[byteIdx:])
+				}
+				break
+			}
+			ansi := line[byteIdx : byteIdx+end+1]
+			if runeIdx < fromCol {
+				before.WriteString(ansi)
+			} else if toCol != -1 && runeIdx >= toCol {
+				after.WriteString(ansi)
+			}
+			// Skip ANSI codes inside selected region
+			byteIdx += end + 1
+		} else {
+			r, size := nextRune(line[byteIdx:])
+			if runeIdx < fromCol {
+				before.WriteRune(r)
+			} else if toCol == -1 || runeIdx < toCol {
+				selected.WriteRune(r)
+			} else {
+				after.WriteRune(r)
+			}
+			byteIdx += size
+			runeIdx++
+		}
+	}
+
+	result := before.String()
+	if selected.Len() > 0 {
+		result += selectionStyle.Render(selected.String())
+	}
+	result += after.String()
+	return result
 }
 
 func HighlightCursor(highlighted string, cursorLine, cursorCol int) string {

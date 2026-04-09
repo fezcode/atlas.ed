@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"atlas.ed/internal/editor"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -63,6 +64,11 @@ const (
 	ModeQuitConfirm
 )
 
+type Pos struct {
+	Line int
+	Col  int
+}
+
 type Model struct {
 	filename        string
 	initialContent  string
@@ -83,6 +89,10 @@ type Model struct {
 	matchIndex  int
 	
 	lineEnding string // "\n" or "\r\n"
+
+	// Selection
+	selAnchor Pos
+	selecting bool
 	
 	// Cache
 	highlightedContent   string
@@ -147,6 +157,7 @@ func NewModel(filename string, content string) Model {
 		showLineNumbers: true,
 		matchIndex:      -1,
 		lineEnding:      le,
+		selAnchor:       Pos{-1, -1},
 	}
 }
 
@@ -160,7 +171,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Global Quit/Interrupt handling
-		if msg.String() == "ctrl+c" || msg.String() == "ctrl+q" {
+		if msg.String() == "ctrl+q" {
 			if m.modified {
 				m.mode = ModeQuitConfirm
 				return m, nil
@@ -252,17 +263,92 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showLineNumbers = !m.showLineNumbers
 			m.textarea.ShowLineNumbers = m.showLineNumbers
 		case "pgup":
+			m.clearSelection()
 			for i := 0; i < m.textarea.Height(); i++ {
 				m.textarea.CursorUp()
 			}
 		case "pgdown":
+			m.clearSelection()
 			for i := 0; i < m.textarea.Height(); i++ {
 				m.textarea.CursorDown()
 			}
 		case "home":
+			m.clearSelection()
 			m.textarea.CursorStart()
 		case "end":
+			m.clearSelection()
 			m.textarea.CursorEnd()
+
+		// Selection with shift+arrow
+		case "shift+left":
+			m.startOrExtendSelection()
+			m.moveCursorLeft()
+			return m, nil
+		case "shift+right":
+			m.startOrExtendSelection()
+			m.moveCursorRight()
+			return m, nil
+		case "shift+up":
+			m.startOrExtendSelection()
+			m.textarea.CursorUp()
+			return m, nil
+		case "shift+down":
+			m.startOrExtendSelection()
+			m.textarea.CursorDown()
+			return m, nil
+		case "ctrl+shift+left":
+			m.startOrExtendSelection()
+			m.wordLeft()
+			return m, nil
+		case "ctrl+shift+right":
+			m.startOrExtendSelection()
+			m.wordRight()
+			return m, nil
+		case "shift+home":
+			m.startOrExtendSelection()
+			m.textarea.CursorStart()
+			return m, nil
+		case "shift+end":
+			m.startOrExtendSelection()
+			m.textarea.CursorEnd()
+			return m, nil
+
+		// Clipboard
+		case "ctrl+c":
+			if m.hasSelection() {
+				clipboard.WriteAll(m.getSelectedText())
+			}
+			return m, nil
+		case "ctrl+x":
+			if m.hasSelection() {
+				clipboard.WriteAll(m.getSelectedText())
+				prevVal := m.textarea.Value()
+				m.deleteSelectionInPlace()
+				m.trackChange(prevVal)
+			}
+			return m, nil
+		case "ctrl+v":
+			text, err := clipboard.ReadAll()
+			if err == nil && text != "" {
+				text = strings.ReplaceAll(text, "\r\n", "\n")
+				prevVal := m.textarea.Value()
+				if m.hasSelection() {
+					m.deleteSelectionInPlace()
+				}
+				m.textarea.InsertString(text)
+				m.trackChange(prevVal)
+			}
+			return m, nil
+		case "ctrl+a":
+			lines := strings.Split(m.textarea.Value(), "\n")
+			m.selAnchor = Pos{0, 0}
+			m.selecting = true
+			lastLine := len(lines) - 1
+			for m.textarea.Line() < lastLine {
+				m.textarea.CursorDown()
+			}
+			m.textarea.CursorEnd()
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -279,29 +365,48 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.mode == ModeEdit {
 		var taCmd tea.Cmd
-		
+
 		if kmsg, ok := msg.(tea.KeyMsg); ok {
 			s := kmsg.String()
 			// Keys that definitely don't change content (navigation, toggle, find, quit)
 			isNav := s == "up" || s == "down" || s == "left" || s == "right" ||
 				s == "ctrl+left" || s == "ctrl+right" ||
 				s == "pgup" || s == "pgdown" || s == "home" || s == "end" ||
-				s == "ctrl+s" || s == "ctrl+f" || s == "ctrl+l" || s == "ctrl+q" || s == "ctrl+c" ||
-				s == "ctrl+z" || s == "ctrl+y" || s == "esc"
+				s == "ctrl+s" || s == "ctrl+f" || s == "ctrl+l" || s == "ctrl+q" ||
+				s == "ctrl+z" || s == "ctrl+y" || s == "esc" ||
+				s == "ctrl+c" || s == "ctrl+x" || s == "ctrl+v" || s == "ctrl+a" ||
+				strings.HasPrefix(s, "shift+") || strings.HasPrefix(s, "ctrl+shift+")
 
 			if !isNav {
 				prevVal := m.textarea.Value()
-				m.textarea, taCmd = m.textarea.Update(msg)
-				newVal := m.textarea.Value()
-				if newVal != prevVal {
-					m.modified = true
-					m.undoStack = append(m.undoStack, prevVal)
-					m.redoStack = nil
-					if len(m.undoStack) > 100 {
-						m.undoStack = m.undoStack[1:]
+				skipTextarea := false
+				// Only treat as content-modifying if it's a printable rune (>= space),
+				// backspace, delete, enter, or tab.
+				// On Windows, bare modifier keys (ctrl, shift, alt) produce control
+				// characters (rune < 32) that must NOT delete the selection.
+				isContentKey := s == "backspace" || s == "delete" || s == "enter" || s == "tab" ||
+					(len([]rune(s)) == 1 && []rune(s)[0] >= ' ')
+				if m.hasSelection() && isContentKey {
+					m.deleteSelectionInPlace()
+					if s == "backspace" || s == "delete" {
+						skipTextarea = true
 					}
 				}
+				if !skipTextarea {
+					m.textarea, taCmd = m.textarea.Update(msg)
+				}
+				if isContentKey {
+					m.trackChange(prevVal)
+				}
 			} else {
+				// Only explicit navigation keys clear selection
+				clearsSelection := s == "up" || s == "down" || s == "left" || s == "right" ||
+					s == "ctrl+left" || s == "ctrl+right" ||
+					s == "pgup" || s == "pgdown" || s == "home" || s == "end" ||
+					s == "esc"
+				if clearsSelection {
+					m.clearSelection()
+				}
 				m.textarea, taCmd = m.textarea.Update(msg)
 			}
 		} else {
@@ -327,6 +432,9 @@ func (m *Model) updateViewport() {
 	var final string
 	if m.mode == ModeSearchNav {
 		final = editor.HighlightSearch(m.highlightedContent, m.searchQuery, m.matchIndex)
+	} else if m.hasSelection() {
+		start, end := m.selectionRange()
+		final = editor.HighlightSelection(m.highlightedContent, start.Line, start.Col, end.Line, end.Col)
 	} else {
 		final = editor.HighlightCursor(m.highlightedContent, m.textarea.Line(), m.textarea.LineInfo().CharOffset)
 	}
@@ -398,6 +506,193 @@ func (m *Model) redo() {
 	m.modified = true
 	if m.textarea.Value() == m.initialContent {
 		m.modified = false
+	}
+}
+
+// Selection helpers
+
+func (m *Model) cursorPos() Pos {
+	return Pos{m.textarea.Line(), m.textarea.LineInfo().CharOffset}
+}
+
+func (m *Model) hasSelection() bool {
+	return m.selecting && m.selAnchor.Line >= 0
+}
+
+func (m *Model) startOrExtendSelection() {
+	if !m.selecting {
+		m.selAnchor = m.cursorPos()
+		m.selecting = true
+	}
+}
+
+func (m *Model) clearSelection() {
+	m.selecting = false
+	m.selAnchor = Pos{-1, -1}
+}
+
+func (m *Model) selectionRange() (Pos, Pos) {
+	anchor := m.selAnchor
+	cursor := m.cursorPos()
+	if anchor.Line < cursor.Line || (anchor.Line == cursor.Line && anchor.Col < cursor.Col) {
+		return anchor, cursor
+	}
+	return cursor, anchor
+}
+
+func (m *Model) getSelectedText() string {
+	if !m.hasSelection() {
+		return ""
+	}
+	start, end := m.selectionRange()
+	lines := strings.Split(m.textarea.Value(), "\n")
+
+	if start.Line == end.Line {
+		r := []rune(lines[start.Line])
+		endCol := min(end.Col, len(r))
+		startCol := min(start.Col, len(r))
+		return string(r[startCol:endCol])
+	}
+
+	var sb strings.Builder
+	r := []rune(lines[start.Line])
+	sb.WriteString(string(r[min(start.Col, len(r)):]))
+	for i := start.Line + 1; i < end.Line; i++ {
+		sb.WriteByte('\n')
+		sb.WriteString(lines[i])
+	}
+	sb.WriteByte('\n')
+	r = []rune(lines[end.Line])
+	sb.WriteString(string(r[:min(end.Col, len(r))]))
+
+	return sb.String()
+}
+
+func (m *Model) deleteSelectionInPlace() {
+	if !m.hasSelection() {
+		return
+	}
+	start, end := m.selectionRange()
+	lines := strings.Split(m.textarea.Value(), "\n")
+
+	var sb strings.Builder
+	for i := 0; i < start.Line; i++ {
+		sb.WriteString(lines[i])
+		sb.WriteByte('\n')
+	}
+	startRunes := []rune(lines[start.Line])
+	startCol := min(start.Col, len(startRunes))
+	sb.WriteString(string(startRunes[:startCol]))
+
+	endRunes := []rune(lines[end.Line])
+	endCol := min(end.Col, len(endRunes))
+	sb.WriteString(string(endRunes[endCol:]))
+
+	for i := end.Line + 1; i < len(lines); i++ {
+		sb.WriteByte('\n')
+		sb.WriteString(lines[i])
+	}
+
+	m.textarea.SetValue(sb.String())
+	m.setCursorPos(start.Line, start.Col)
+	m.clearSelection()
+}
+
+func (m *Model) setCursorPos(line, col int) {
+	for m.textarea.Line() > line {
+		m.textarea.CursorUp()
+	}
+	for m.textarea.Line() < line {
+		m.textarea.CursorDown()
+	}
+	m.textarea.SetCursor(col)
+}
+
+// Cursor movement helpers (textarea doesn't export these)
+
+func (m *Model) moveCursorLeft() {
+	col := m.textarea.LineInfo().CharOffset
+	if col > 0 {
+		m.textarea.SetCursor(col - 1)
+	} else if m.textarea.Line() > 0 {
+		m.textarea.CursorUp()
+		m.textarea.CursorEnd()
+	}
+}
+
+func (m *Model) moveCursorRight() {
+	lines := strings.Split(m.textarea.Value(), "\n")
+	col := m.textarea.LineInfo().CharOffset
+	lineLen := len([]rune(lines[m.textarea.Line()]))
+	if col < lineLen {
+		m.textarea.SetCursor(col + 1)
+	} else if m.textarea.Line() < len(lines)-1 {
+		m.textarea.CursorDown()
+		m.textarea.CursorStart()
+	}
+}
+
+func isWordChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+func (m *Model) wordLeft() {
+	lines := strings.Split(m.textarea.Value(), "\n")
+	line := m.textarea.Line()
+	col := m.textarea.LineInfo().CharOffset
+
+	if col == 0 {
+		if line > 0 {
+			m.textarea.CursorUp()
+			m.textarea.CursorEnd()
+		}
+		return
+	}
+
+	runes := []rune(lines[line])
+	pos := col - 1
+	for pos > 0 && !isWordChar(runes[pos]) {
+		pos--
+	}
+	for pos > 0 && isWordChar(runes[pos-1]) {
+		pos--
+	}
+	m.textarea.SetCursor(pos)
+}
+
+func (m *Model) wordRight() {
+	lines := strings.Split(m.textarea.Value(), "\n")
+	line := m.textarea.Line()
+	col := m.textarea.LineInfo().CharOffset
+	runes := []rune(lines[line])
+
+	if col >= len(runes) {
+		if line < len(lines)-1 {
+			m.textarea.CursorDown()
+			m.textarea.CursorStart()
+		}
+		return
+	}
+
+	pos := col
+	for pos < len(runes) && isWordChar(runes[pos]) {
+		pos++
+	}
+	for pos < len(runes) && !isWordChar(runes[pos]) {
+		pos++
+	}
+	m.textarea.SetCursor(pos)
+}
+
+func (m *Model) trackChange(prevVal string) {
+	newVal := m.textarea.Value()
+	if newVal != prevVal {
+		m.modified = true
+		m.undoStack = append(m.undoStack, prevVal)
+		m.redoStack = nil
+		if len(m.undoStack) > 100 {
+			m.undoStack = m.undoStack[1:]
+		}
 	}
 }
 
@@ -546,7 +841,8 @@ func (m *Model) footerView() string {
 			helpKeyStyle.Render(" ^Z "), helpDescStyle.Render("undo "),
 			helpKeyStyle.Render(" ^Y "), helpDescStyle.Render("redo "),
 			helpKeyStyle.Render(" ^F "), helpDescStyle.Render("find "),
-			helpKeyStyle.Render(" ^L "), helpDescStyle.Render("lines "),
+			helpKeyStyle.Render(" ^C "), helpDescStyle.Render("copy "),
+			helpKeyStyle.Render(" ^V "), helpDescStyle.Render("paste "),
 			helpKeyStyle.Render(" ^Q "), helpDescStyle.Render("quit "),
 		)
 	}

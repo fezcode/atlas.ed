@@ -11,7 +11,10 @@ A beautiful, high-performance terminal text editor with syntax highlighting, lin
 ## Features
 
 - **Editable Interface:** Powered by [Bubble Tea Textarea](https://github.com/charmbracelet/bubbles/tree/master/textarea).
+- **Selection:** Select text with `Shift+Arrow`, `Ctrl+Shift+Arrow` (word), `Shift+Home/End`, or `Ctrl+A` (select all).
+- **Clipboard:** Copy (`^C`), Cut (`^X`), and Paste (`^V`) with system clipboard support.
 - **Search:** Quickly find and jump to occurrences of text with `^F`.
+- **Undo/Redo:** `^Z` to undo, `^Y` to redo.
 - **Line Numbers:** Toggleable line numbers with `^L`.
 - **Keyboard Centric:** Smooth editing, saving (`^S`), and navigation.
 - **Minimalist:** Fast, dependency-light, and aesthetic.
@@ -34,9 +37,16 @@ atlas.ed -v
 
 ## TUI Controls
 
-- **^S:** Save file
-- **^F:** Search
-- **^L:** Toggle line numbers
-- **^Q:** Quit
-- **n:** Next search match
-- **p:** Previous search match
+| Key | Action |
+|-----|--------|
+| **^S** | Save file |
+| **^Z / ^Y** | Undo / Redo |
+| **^C / ^X / ^V** | Copy / Cut / Paste |
+| **^A** | Select all |
+| **^F** | Search |
+| **^L** | Toggle line numbers |
+| **^Q** | Quit |
+| **Shift+Arrows** | Select text |
+| **Ctrl+Shift+Arrows** | Select by word |
+| **Shift+Home/End** | Select to line start/end |
+| **n / p** | Next / Previous search match |
