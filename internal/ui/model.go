@@ -64,6 +64,16 @@ const (
 	ModeQuitConfirm
 )
 
+type ActionType int
+
+const (
+	ActionNone ActionType = iota
+	ActionInsert
+	ActionDelete
+	ActionOther
+	ActionPaste
+)
+
 type Pos struct {
 	Line int
 	Col  int
@@ -78,12 +88,14 @@ type Model struct {
 	mode            Mode
 	showLineNumbers bool
 	modified        bool
-	
+
 	// Undo/Redo
-	undoStack []string
-	redoStack []string
-	
+	undoStack  []string
+	redoStack  []string
+	lastAction ActionType
+
 	// Search
+
 	searchQuery string
 	matches     []int
 	matchIndex  int
@@ -170,6 +182,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle Paste in Bubbletea v1
+		if msg.Paste {
+			if m.mode == ModeEdit {
+				prevVal := m.textarea.Value()
+				if m.hasSelection() {
+					m.deleteSelectionInPlace()
+				}
+				text := msg.String()
+				text = strings.ReplaceAll(text, "\r\n", "\n")
+				m.textarea.InsertString(text)
+				m.trackChange(prevVal, ActionPaste)
+				return m, nil
+			}
+		}
+
 		// Global Quit/Interrupt handling
 		if msg.String() == "ctrl+q" {
 			if m.modified {
@@ -324,7 +351,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clipboard.WriteAll(m.getSelectedText())
 				prevVal := m.textarea.Value()
 				m.deleteSelectionInPlace()
-				m.trackChange(prevVal)
+				m.trackChange(prevVal, ActionOther)
 			}
 			return m, nil
 		case "ctrl+v":
@@ -336,7 +363,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.deleteSelectionInPlace()
 				}
 				m.textarea.InsertString(text)
-				m.trackChange(prevVal)
+				m.trackChange(prevVal, ActionPaste)
 			}
 			return m, nil
 		case "ctrl+a":
@@ -396,7 +423,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.textarea, taCmd = m.textarea.Update(msg)
 				}
 				if isContentKey {
-					m.trackChange(prevVal)
+					action := ActionInsert
+					if s == "backspace" || s == "delete" {
+						action = ActionDelete
+					} else if s == "enter" || s == "tab" || s == " " {
+						action = ActionOther
+					}
+					m.trackChange(prevVal, action)
 				}
 			} else {
 				// Only explicit navigation keys clear selection
@@ -684,15 +717,28 @@ func (m *Model) wordRight() {
 	m.textarea.SetCursor(pos)
 }
 
-func (m *Model) trackChange(prevVal string) {
+func (m *Model) trackChange(prevVal string, currentAction ActionType) {
 	newVal := m.textarea.Value()
 	if newVal != prevVal {
 		m.modified = true
-		m.undoStack = append(m.undoStack, prevVal)
-		m.redoStack = nil
-		if len(m.undoStack) > 100 {
-			m.undoStack = m.undoStack[1:]
+		
+		// Group continuous typing/deleting actions
+		shouldPush := true
+		if m.lastAction == currentAction {
+			if currentAction == ActionInsert || currentAction == ActionDelete {
+				shouldPush = false
+			}
 		}
+
+		if shouldPush {
+			m.undoStack = append(m.undoStack, prevVal)
+			m.redoStack = nil
+			if len(m.undoStack) > 100 {
+				m.undoStack = m.undoStack[1:]
+			}
+		}
+		
+		m.lastAction = currentAction
 	}
 }
 
