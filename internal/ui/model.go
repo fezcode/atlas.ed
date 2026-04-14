@@ -79,6 +79,12 @@ type Pos struct {
 	Col  int
 }
 
+type UndoState struct {
+	Content string
+	Line    int
+	Col     int
+}
+
 type Model struct {
 	filename        string
 	initialContent  string
@@ -90,9 +96,10 @@ type Model struct {
 	modified        bool
 
 	// Undo/Redo
-	undoStack  []string
-	redoStack  []string
-	lastAction ActionType
+	undoStack   []UndoState
+	redoStack   []UndoState
+	lastAction  ActionType
+	actionCount int
 
 	// Search
 
@@ -186,13 +193,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Paste {
 			if m.mode == ModeEdit {
 				prevVal := m.textarea.Value()
+				prevLine := m.textarea.Line()
+				prevCol := m.textarea.LineInfo().CharOffset
 				if m.hasSelection() {
 					m.deleteSelectionInPlace()
 				}
 				text := msg.String()
 				text = strings.ReplaceAll(text, "\r\n", "\n")
 				m.textarea.InsertString(text)
-				m.trackChange(prevVal, ActionPaste)
+				m.trackChange(prevVal, prevLine, prevCol, ActionPaste)
 				return m, nil
 			}
 		}
@@ -350,8 +359,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.hasSelection() {
 				clipboard.WriteAll(m.getSelectedText())
 				prevVal := m.textarea.Value()
+				prevLine := m.textarea.Line()
+				prevCol := m.textarea.LineInfo().CharOffset
 				m.deleteSelectionInPlace()
-				m.trackChange(prevVal, ActionOther)
+				m.trackChange(prevVal, prevLine, prevCol, ActionOther)
 			}
 			return m, nil
 		case "ctrl+v":
@@ -359,11 +370,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err == nil && text != "" {
 				text = strings.ReplaceAll(text, "\r\n", "\n")
 				prevVal := m.textarea.Value()
+				prevLine := m.textarea.Line()
+				prevCol := m.textarea.LineInfo().CharOffset
 				if m.hasSelection() {
 					m.deleteSelectionInPlace()
 				}
 				m.textarea.InsertString(text)
-				m.trackChange(prevVal, ActionPaste)
+				m.trackChange(prevVal, prevLine, prevCol, ActionPaste)
 			}
 			return m, nil
 		case "ctrl+a":
@@ -406,6 +419,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if !isNav {
 				prevVal := m.textarea.Value()
+				prevLine := m.textarea.Line()
+				prevCol := m.textarea.LineInfo().CharOffset
 				skipTextarea := false
 				// Only treat as content-modifying if it's a printable rune (>= space),
 				// backspace, delete, enter, or tab.
@@ -429,7 +444,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if s == "enter" || s == "tab" || s == " " {
 						action = ActionOther
 					}
-					m.trackChange(prevVal, action)
+					m.trackChange(prevVal, prevLine, prevCol, action)
 				}
 			} else {
 				// Only explicit navigation keys clear selection
@@ -440,6 +455,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if clearsSelection {
 					m.clearSelection()
 				}
+				m.lastAction = ActionNone
+				m.actionCount = 0
 				m.textarea, taCmd = m.textarea.Update(msg)
 			}
 		} else {
@@ -515,15 +532,22 @@ func (m *Model) undo() {
 		return
 	}
 
-	m.redoStack = append(m.redoStack, m.textarea.Value())
+	m.redoStack = append(m.redoStack, UndoState{
+		Content: m.textarea.Value(),
+		Line:    m.textarea.Line(),
+		Col:     m.textarea.LineInfo().CharOffset,
+	})
 	prev := m.undoStack[len(m.undoStack)-1]
 	m.undoStack = m.undoStack[:len(m.undoStack)-1]
 
-	m.textarea.SetValue(prev)
+	m.textarea.SetValue(prev.Content)
+	m.setCursorPos(prev.Line, prev.Col)
 	m.modified = true
 	if m.textarea.Value() == m.initialContent {
 		m.modified = false
 	}
+	m.lastAction = ActionNone
+	m.actionCount = 0
 }
 
 func (m *Model) redo() {
@@ -531,15 +555,22 @@ func (m *Model) redo() {
 		return
 	}
 
-	m.undoStack = append(m.undoStack, m.textarea.Value())
+	m.undoStack = append(m.undoStack, UndoState{
+		Content: m.textarea.Value(),
+		Line:    m.textarea.Line(),
+		Col:     m.textarea.LineInfo().CharOffset,
+	})
 	next := m.redoStack[len(m.redoStack)-1]
 	m.redoStack = m.redoStack[:len(m.redoStack)-1]
 
-	m.textarea.SetValue(next)
+	m.textarea.SetValue(next.Content)
+	m.setCursorPos(next.Line, next.Col)
 	m.modified = true
 	if m.textarea.Value() == m.initialContent {
 		m.modified = false
 	}
+	m.lastAction = ActionNone
+	m.actionCount = 0
 }
 
 // Selection helpers
@@ -717,7 +748,7 @@ func (m *Model) wordRight() {
 	m.textarea.SetCursor(pos)
 }
 
-func (m *Model) trackChange(prevVal string, currentAction ActionType) {
+func (m *Model) trackChange(prevVal string, prevLine, prevCol int, currentAction ActionType) {
 	newVal := m.textarea.Value()
 	if newVal != prevVal {
 		m.modified = true
@@ -726,12 +757,23 @@ func (m *Model) trackChange(prevVal string, currentAction ActionType) {
 		shouldPush := true
 		if m.lastAction == currentAction {
 			if currentAction == ActionInsert || currentAction == ActionDelete {
-				shouldPush = false
+				m.actionCount++
+				if m.actionCount < 20 {
+					shouldPush = false
+				} else {
+					m.actionCount = 0
+				}
 			}
+		} else {
+			m.actionCount = 0
 		}
 
 		if shouldPush {
-			m.undoStack = append(m.undoStack, prevVal)
+			m.undoStack = append(m.undoStack, UndoState{
+				Content: prevVal,
+				Line:    prevLine,
+				Col:     prevCol,
+			})
 			m.redoStack = nil
 			if len(m.undoStack) > 100 {
 				m.undoStack = m.undoStack[1:]
