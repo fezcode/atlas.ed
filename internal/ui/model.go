@@ -491,9 +491,10 @@ func (m *Model) updateViewport() {
 	
 	if m.showLineNumbers {
 		var sb strings.Builder
-		// Split by \n, handle potential \r separately if they exist in highlighted output
 		lines := strings.Split(final, "\n")
-		width := len(fmt.Sprintf("%d", m.textarea.MaxHeight))
+		numWidth := len(fmt.Sprintf("%d", m.textarea.MaxHeight))
+		contentWidth := m.width - (numWidth + 3) // +3 for spaces around line number
+
 		for i, line := range lines {
 			if i == len(lines)-1 && line == "" {
 				break
@@ -502,13 +503,28 @@ func (m *Model) updateViewport() {
 			if i == m.textarea.Line() {
 				lineNumberStyle = lineNumberStyle.Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
 			}
-			sb.WriteString(lineNumberStyle.Render(fmt.Sprintf(" %*d ", width, i+1)))
-			sb.WriteString(line)
+			sb.WriteString(lineNumberStyle.Render(fmt.Sprintf(" %*d ", numWidth, i+1)))
+			
+			// Simple truncation for now to keep layout sane
+			// In the future, we can implement horizontal scrolling
+			displayLine := line
+			if contentWidth > 0 {
+				displayLine = truncateAnsi(line, contentWidth)
+			}
+			sb.WriteString(displayLine)
+
 			if i < len(lines)-1 {
 				sb.WriteByte('\n')
 			}
 		}
 		final = sb.String()
+	} else {
+		// Truncate even without line numbers
+		lines := strings.Split(final, "\n")
+		for i, line := range lines {
+			lines[i] = truncateAnsi(line, m.width)
+		}
+		final = strings.Join(lines, "\n")
 	}
 	
 	m.viewport.SetContent(final)
@@ -958,4 +974,50 @@ func max(a, b int) int {
 func min(a, b int) int {
 	if a < b { return a }
 	return b
+}
+
+func truncateAnsi(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+
+	var result strings.Builder
+	runeCount := 0
+	byteIdx := 0
+
+	for byteIdx < len(s) {
+		if strings.HasPrefix(s[byteIdx:], "\x1b[") {
+			end := strings.IndexAny(s[byteIdx:], "mABCDHJKfhnpsu")
+			if end == -1 {
+				result.WriteString(s[byteIdx:])
+				break
+			}
+			result.WriteString(s[byteIdx : byteIdx+end+1])
+			byteIdx += end + 1
+		} else {
+			r, size := nextRune(s[byteIdx:])
+			if runeCount < limit {
+				result.WriteRune(r)
+				runeCount++
+			} else {
+				// Don't break yet, we might have reset ANSI codes at the end
+				// But for simplicity in this editor, we can just break if we want.
+				// However, it's safer to just skip runes.
+			}
+			byteIdx += size
+		}
+	}
+	return result.String()
+}
+
+func nextRune(s string) (rune, int) {
+	if len(s) == 0 {
+		return 0, 0
+	}
+	for i, r := range s {
+		if i == 0 {
+			return r, len(string(r))
+		}
+	}
+	return 0, 0
 }
