@@ -125,6 +125,7 @@ type Model struct {
 	lastMatchesCount int
 	lastMatchIndex int
 
+	xOffset int
 	width  int
 	height int
 }
@@ -177,6 +178,7 @@ func NewModel(filename string, content string) Model {
 		matchIndex:      -1,
 		lineEnding:      le,
 		selAnchor:       Pos{-1, -1},
+		xOffset:         0,
 	}
 }
 
@@ -489,11 +491,24 @@ func (m *Model) updateViewport() {
 		final = editor.HighlightCursor(m.highlightedContent, m.textarea.Line(), m.textarea.LineInfo().CharOffset)
 	}
 	
+	numWidth := 0
+	if m.showLineNumbers {
+		numWidth = len(fmt.Sprintf("%d", m.textarea.MaxHeight)) + 3
+	}
+	contentWidth := m.width - numWidth
+
+	// Update xOffset based on cursor position
+	cursorCol := m.textarea.LineInfo().CharOffset
+	if cursorCol < m.xOffset {
+		m.xOffset = cursorCol
+	} else if cursorCol >= m.xOffset+contentWidth {
+		m.xOffset = cursorCol - contentWidth + 1
+	}
+
 	if m.showLineNumbers {
 		var sb strings.Builder
 		lines := strings.Split(final, "\n")
-		numWidth := len(fmt.Sprintf("%d", m.textarea.MaxHeight))
-		contentWidth := m.width - (numWidth + 3) // +3 for spaces around line number
+		numOnlyWidth := numWidth - 3
 
 		for i, line := range lines {
 			if i == len(lines)-1 && line == "" {
@@ -503,13 +518,11 @@ func (m *Model) updateViewport() {
 			if i == m.textarea.Line() {
 				lineNumberStyle = lineNumberStyle.Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
 			}
-			sb.WriteString(lineNumberStyle.Render(fmt.Sprintf(" %*d ", numWidth, i+1)))
+			sb.WriteString(lineNumberStyle.Render(fmt.Sprintf(" %*d ", numOnlyWidth, i+1)))
 			
-			// Simple truncation for now to keep layout sane
-			// In the future, we can implement horizontal scrolling
 			displayLine := line
 			if contentWidth > 0 {
-				displayLine = truncateAnsi(line, contentWidth)
+				displayLine = sliceAnsi(line, m.xOffset, contentWidth)
 			}
 			sb.WriteString(displayLine)
 
@@ -519,10 +532,9 @@ func (m *Model) updateViewport() {
 		}
 		final = sb.String()
 	} else {
-		// Truncate even without line numbers
 		lines := strings.Split(final, "\n")
 		for i, line := range lines {
-			lines[i] = truncateAnsi(line, m.width)
+			lines[i] = sliceAnsi(line, m.xOffset, m.width)
 		}
 		final = strings.Join(lines, "\n")
 	}
@@ -977,11 +989,16 @@ func min(a, b int) int {
 }
 
 func truncateAnsi(s string, limit int) string {
-	if limit <= 0 {
+	return sliceAnsi(s, 0, limit)
+}
+
+func sliceAnsi(s string, start, width int) string {
+	if width <= 0 {
 		return ""
 	}
 
 	var result strings.Builder
+	var activeAnsi strings.Builder
 	runeCount := 0
 	byteIdx := 0
 
@@ -989,22 +1006,32 @@ func truncateAnsi(s string, limit int) string {
 		if strings.HasPrefix(s[byteIdx:], "\x1b[") {
 			end := strings.IndexAny(s[byteIdx:], "mABCDHJKfhnpsu")
 			if end == -1 {
-				result.WriteString(s[byteIdx:])
+				if runeCount >= start && runeCount < start+width {
+					result.WriteString(s[byteIdx:])
+				}
 				break
 			}
-			result.WriteString(s[byteIdx : byteIdx+end+1])
+			ansi := s[byteIdx : byteIdx+end+1]
+			if runeCount < start {
+				activeAnsi.WriteString(ansi)
+			} else if runeCount < start+width {
+				result.WriteString(ansi)
+			}
 			byteIdx += end + 1
 		} else {
 			r, size := nextRune(s[byteIdx:])
-			if runeCount < limit {
+			if runeCount == start {
+				result.WriteString(activeAnsi.String())
+			}
+			if runeCount >= start && runeCount < start+width {
 				result.WriteRune(r)
-				runeCount++
-			} else {
-				// Don't break yet, we might have reset ANSI codes at the end
-				// But for simplicity in this editor, we can just break if we want.
-				// However, it's safer to just skip runes.
 			}
 			byteIdx += size
+			runeCount++
+			if runeCount >= start+width {
+				result.WriteString("\x1b[0m") // Reset at the end of slice
+				break
+			}
 		}
 	}
 	return result.String()
