@@ -124,6 +124,8 @@ type Model struct {
 	lastModified bool
 	lastMatchesCount int
 	lastMatchIndex int
+	lastLine int
+	lastCol  int
 
 	xOffset int
 	width  int
@@ -142,7 +144,7 @@ func NewModel(filename string, content string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Start typing..."
 	ta.CharLimit = 0
-	ta.SetWidth(9999)
+	ta.SetWidth(1000000)
 	ta.SetValue(content)
 	ta.SetCursor(0) // Start at the top
 	ta.Focus()
@@ -400,7 +402,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		headerHeight := lipgloss.Height(m.headerView())
 		footerHeight := lipgloss.Height(m.footerView())
 		
-		m.textarea.SetWidth(msg.Width)
+		// Do NOT set textarea width to msg.Width, otherwise it will wrap.
+		// We keep it large (9999) as initialized in NewModel.
 		m.textarea.SetHeight(msg.Height - headerHeight - footerHeight)
 		
 		m.viewport.Width = msg.Width
@@ -941,7 +944,12 @@ func (m *Model) footerView() string {
 		return m.searchInput.View()
 	}
 
-	if m.footerCache != "" && m.width == m.lastWidth && m.mode == m.lastMode && len(m.matches) == m.lastMatchesCount && m.matchIndex == m.lastMatchIndex {
+	cursorLine := m.textarea.Line() + 1
+	cursorCol := m.textarea.LineInfo().CharOffset + 1
+
+	if m.footerCache != "" && m.width == m.lastWidth && m.mode == m.lastMode && 
+		len(m.matches) == m.lastMatchesCount && m.matchIndex == m.lastMatchIndex &&
+		m.lastLine == cursorLine && m.lastCol == cursorCol {
 		return m.footerCache
 	}
 
@@ -970,12 +978,16 @@ func (m *Model) footerView() string {
 		matchInfo = matchCountStyle.Render(fmt.Sprintf(" MATCH %d/%d ", m.matchIndex+1, len(m.matches)))
 	}
 
-	gap := max(0, m.width-lipgloss.Width(help)-lipgloss.Width(matchInfo)-2)
+	cursorInfo := statusStyle.Render(fmt.Sprintf(" LN %d, COL %d ", cursorLine, cursorCol))
+
+	gap := max(0, m.width-lipgloss.Width(help)-lipgloss.Width(matchInfo)-lipgloss.Width(cursorInfo)-2)
 	line := strings.Repeat(" ", gap)
 	
-	m.footerCache = lipgloss.JoinHorizontal(lipgloss.Center, help, line, matchInfo)
+	m.footerCache = lipgloss.JoinHorizontal(lipgloss.Center, help, line, matchInfo, cursorInfo)
 	m.lastMatchesCount = len(m.matches)
 	m.lastMatchIndex = m.matchIndex
+	m.lastLine = cursorLine
+	m.lastCol = cursorCol
 
 	return m.footerCache
 }
