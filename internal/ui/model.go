@@ -141,6 +141,8 @@ func NewModel(filename string, content string) Model {
 
 	ta := textarea.New()
 	ta.Placeholder = "Start typing..."
+	ta.CharLimit = 0
+	ta.SetWidth(9999)
 	ta.SetValue(content)
 	ta.SetCursor(0) // Start at the top
 	ta.Focus()
