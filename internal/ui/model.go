@@ -395,6 +395,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.textarea.CursorEnd()
 			return m, nil
+		case "tab":
+			prevVal := m.textarea.Value()
+			prevLine := m.textarea.Line()
+			prevCol := m.textarea.LineInfo().CharOffset
+			if m.hasSelection() {
+				m.deleteSelectionInPlace()
+			}
+			m.textarea.InsertString("\t")
+			m.trackChange(prevVal, prevLine, prevCol, ActionOther)
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
